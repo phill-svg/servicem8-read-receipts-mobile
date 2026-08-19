@@ -1,0 +1,105 @@
+// ServiceM8 OAuth2: install-time token exchange + per-call token refresh.
+// Copied from servicem8-renewal-autopilot/src/servicem8-oauth.js (same
+// confirmed-live handshake) and trimmed to this add-on's own scope needs.
+
+const AUTHORIZE_URL = "https://go.servicem8.com/oauth/authorize";
+const TOKEN_URL = "https://go.servicem8.com/oauth/access_token";
+
+// Minimal scope for this add-on: read_email to see opened/first_opened_at on
+// email.json, manage_job_notes to post the job note that surfaces it on
+// mobile. NEEDS LIVE CONFIRMATION: "manage_job_notes" is inferred from
+// ServiceM8's read_X/manage_X naming pattern (read_job_notes already exists,
+// confirmed live in the sibling repo) but has not itself been confirmed --
+// if the first note-create call 403s with a different required scope name,
+// fix it here.
+export const OAUTH_SCOPES = "read_email manage_job_notes";
+
+export function buildAuthorizeUrl({ appId, redirectUri, state }) {
+  const url = new URL(AUTHORIZE_URL);
+  url.searchParams.set("response_type", "code");
+  url.searchParams.set("client_id", appId);
+  url.searchParams.set("redirect_uri", redirectUri);
+  url.searchParams.set("scope", OAUTH_SCOPES);
+  url.searchParams.set("state", state);
+  return url.toString();
+}
+
+async function tokenRequest(env, body) {
+  const res = await fetch(TOKEN_URL, {
+    method: "POST",
+    headers: { "Content-Type": "application/x-www-form-urlencoded" },
+    body: new URLSearchParams({
+      client_id: env.SERVICEM8_APP_ID,
+      client_secret: env.SERVICEM8_APP_SECRET,
+      ...body,
+    }),
+  });
+  if (!res.ok) {
+    throw new Error(`ServiceM8 OAuth token request failed: ${res.status} ${await res.text()}`);
+  }
+  return res.json();
+}
+
+export async function exchangeCodeForTokens(env, { code, redirectUri }) {
+  return tokenRequest(env, { grant_type: "authorization_code", code, redirect_uri: redirectUri });
+}
+
+async function refreshTokens(env, refreshToken) {
+  return tokenRequest(env, { grant_type: "refresh_token", refresh_token: refreshToken });
+}
+
+export async function storeTokens(db, tenantId, tokens) {
+  const now = Date.now();
+  const expiresAt = now + tokens.expires_in * 1000;
+  await db
+    .prepare(
+      `INSERT INTO oauth_tokens (tenant_id, access_token, refresh_token, access_token_expires_at, scope, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?)
+       ON CONFLICT(tenant_id) DO UPDATE SET
+         access_token = excluded.access_token,
+         refresh_token = excluded.refresh_token,
+         access_token_expires_at = excluded.access_token_expires_at,
+         scope = excluded.scope,
+         updated_at = excluded.updated_at`
+    )
+    .bind(tenantId, tokens.access_token, tokens.refresh_token, expiresAt, tokens.scope || OAUTH_SCOPES, now)
+    .run();
+}
+
+const REFRESH_SKEW_MS = 60_000; // refresh if expiring within the next 60s
+
+// Same optimistic-lock refresh pattern as the sibling repo: a concurrent
+// cron tick and a retried call can both want to refresh around the same
+// moment, and refresh_token rotates on every use, so only one caller should
+// actually perform the refresh.
+export async function getValidAccessToken(env, tenantId) {
+  const row = await env.DB.prepare("SELECT * FROM oauth_tokens WHERE tenant_id = ?").bind(tenantId).first();
+  if (!row) throw new Error(`No OAuth tokens on file for tenant ${tenantId}`);
+
+  if (row.access_token_expires_at > Date.now() + REFRESH_SKEW_MS) {
+    return row.access_token;
+  }
+
+  let fresh;
+  try {
+    fresh = await refreshTokens(env, row.refresh_token);
+  } catch (err) {
+    const now = await env.DB.prepare("SELECT * FROM oauth_tokens WHERE tenant_id = ?").bind(tenantId).first();
+    if (now && now.access_token_expires_at > Date.now()) return now.access_token;
+    throw err;
+  }
+
+  const now = Date.now();
+  const expiresAt = now + fresh.expires_in * 1000;
+  const result = await env.DB.prepare(
+    `UPDATE oauth_tokens SET access_token = ?, refresh_token = ?, access_token_expires_at = ?, updated_at = ?
+     WHERE tenant_id = ? AND access_token_expires_at = ?`
+  )
+    .bind(fresh.access_token, fresh.refresh_token, expiresAt, now, tenantId, row.access_token_expires_at)
+    .run();
+
+  if (result.meta.changes > 0) return fresh.access_token;
+
+  const winner = await env.DB.prepare("SELECT access_token FROM oauth_tokens WHERE tenant_id = ?").bind(tenantId).first();
+  return winner.access_token;
+}

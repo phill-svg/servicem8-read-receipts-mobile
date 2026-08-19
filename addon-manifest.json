@@ -1,0 +1,12 @@
+{
+  "name": "Read Receipts for Mobile",
+  "version": "1.0",
+  "iconURL": "https://servicem8-read-receipts-mobile.phill-abb.workers.dev/assets/images/addon-icon-512.png",
+  "supportURL": "https://tcbpestcontrolcanberra.com.au",
+  "supportEmail": "phill@tcbpestcontrolcanberra.com.au",
+  "activationURL": "https://servicem8-read-receipts-mobile.phill-abb.workers.dev/install",
+  "callbackURL": "https://servicem8-read-receipts-mobile.phill-abb.workers.dev/oauth/callback",
+  "oauth": {
+    "scope": "read_email manage_job_notes"
+  }
+}

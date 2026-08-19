@@ -1,0 +1,17 @@
+{
+  "name": "read-receipts-mobile",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "ServiceM8 add-on: posts a job note when a sent email is opened, so read receipts (desktop-only in ServiceM8) show up in the mobile app's job activity feed.",
+  "scripts": {
+    "dev": "wrangler dev",
+    "deploy": "wrangler deploy",
+    "test": "node --test test/**/*.test.js",
+    "db:init": "wrangler d1 execute read-receipts-mobile-db --local --file=./schema.sql",
+    "db:init:remote": "wrangler d1 execute read-receipts-mobile-db --remote --file=./schema.sql"
+  },
+  "devDependencies": {
+    "wrangler": "^4.112.0"
+  }
+}

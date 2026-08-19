@@ -1,0 +1,32 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "servicem8-read-receipts-mobile",
+  "main": "src/index.js",
+  "compatibility_date": "2026-08-19",
+  "compatibility_flags": ["nodejs_compat"],
+  "workers_dev": true,
+  "assets": {
+    "directory": "./public",
+    "binding": "ASSETS"
+  },
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "read-receipts-mobile-db",
+      "database_id": "0012d7e4-52d8-48c3-939d-d063f14df485"
+    }
+  ],
+  "triggers": {
+    // Every 10 minutes: how quickly a "customer opened your email" note
+    // shows up on mobile after the fact. Tighten or loosen once live
+    // ServiceM8 API rate limits under this poll rate are known.
+    "crons": ["*/10 * * * *"]
+  },
+  "observability": {
+    "enabled": true,
+    "logs": {
+      "enabled": true,
+      "invocation_logs": true
+    }
+  }
+}
