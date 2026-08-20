@@ -6,13 +6,11 @@ const AUTHORIZE_URL = "https://go.servicem8.com/oauth/authorize";
 const TOKEN_URL = "https://go.servicem8.com/oauth/access_token";
 
 // Minimal scope for this add-on: read_email to see opened/first_opened_at on
-// email.json, manage_job_notes to post the job note that surfaces it on
-// mobile. NEEDS LIVE CONFIRMATION: "manage_job_notes" is inferred from
-// ServiceM8's read_X/manage_X naming pattern (read_job_notes already exists,
-// confirmed live in the sibling repo) but has not itself been confirmed --
-// if the first note-create call 403s with a different required scope name,
-// fix it here.
-export const OAUTH_SCOPES = "read_email manage_job_notes";
+// email.json, publish_job_notes to post the job note that surfaces it on
+// mobile. Confirmed against ServiceM8's own OAuth scope list -- notes follow
+// a read_X/publish_X pattern (like read_job_photos/publish_job_photos), not
+// the read_X/manage_X pattern used elsewhere (e.g. manage_badges).
+export const OAUTH_SCOPES = "read_email publish_job_notes";
 
 export function buildAuthorizeUrl({ appId, redirectUri, state }) {
   const url = new URL(AUTHORIZE_URL);

@@ -7,6 +7,6 @@
   "activationURL": "https://servicem8-read-receipts-mobile.phill-abb.workers.dev/install",
   "callbackURL": "https://servicem8-read-receipts-mobile.phill-abb.workers.dev/oauth/callback",
   "oauth": {
-    "scope": "read_email manage_job_notes"
+    "scope": "read_email publish_job_notes"
   }
 }

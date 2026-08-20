@@ -36,7 +36,7 @@ The selection/formatting logic (`selectNewlyOpenedEmails`,
    ID + Secret. Set:
    - Activation URL: `https://servicem8-read-receipts-mobile.phill-abb.workers.dev/install`
    - Callback URL: `https://servicem8-read-receipts-mobile.phill-abb.workers.dev/oauth/callback`
-   - Scopes: `read_email manage_job_notes` (see the note on `manage_job_notes` below)
+   - Scopes: `read_email publish_job_notes`
 
 2. **Set the two secrets** on the deployed Worker (Cloudflare dashboard ->
    Workers -> this worker -> Settings -> Variables, or `wrangler secret put`
@@ -53,20 +53,16 @@ The selection/formatting logic (`selectNewlyOpenedEmails`,
    Developer Portal's Private Add-on Install URL) from within your
    ServiceM8 account.
 
-## Two things flagged as unverified, to check on the first live run
+## One thing still flagged as unverified
 
-Both are called out inline in the code (`grep -rn "NEEDS LIVE CONFIRMATION"`)
--- same practice as the sibling repo, which flags an assumption rather than
-guessing silently:
+Called out inline in the code (`grep -rn "NEEDS LIVE CONFIRMATION"`):
 
-- **`manage_job_notes` scope name** (`src/servicem8-oauth.js`): inferred from
-  ServiceM8's `read_X`/`manage_X` pattern (`read_job_notes` is confirmed live
-  elsewhere), but the write counterpart itself hasn't been. If the first
-  note-post 403s, the error message will name the actual required scope --
-  fix it there and re-authorize.
 - **`edit_date` filter on `email.json`** (`src/servicem8-api.js`): assumed to
   work like other ServiceM8 objects, to bound each poll to recently-touched
   emails. If it's rejected or ignored, the poller still works correctly
   (the `notified_emails` dedupe table prevents duplicate notes either way) --
   it would just be scanning more emails per run than necessary. Worth
   checking Worker logs once live.
+
+(The OAuth scope for creating notes -- `publish_job_notes` -- is confirmed
+against ServiceM8's own published scope list, not a guess.)
