@@ -26,17 +26,30 @@ The selection/formatting logic (`selectNewlyOpenedEmails`,
 
 ## Already provisioned
 
-- D1 database `read-receipts-mobile-db` exists and has the schema applied
-  (see `schema.sql`) -- its `database_id` is already wired into
-  `wrangler.jsonc`.
+- D1 database `read-receipts-mobile-db` exists, its `database_id` is wired
+  into `wrangler.jsonc`, and the schema **has been applied** (2026-09-05):
+  `tenants`, `oauth_tokens`, `notified_emails` and
+  `idx_notified_emails_tenant` are all present. Re-running
+  `npm run db:init:remote` is harmless -- every statement is
+  `CREATE ... IF NOT EXISTS`.
 
 ## Still needed before this can go live
 
 1. **Register the add-on in the ServiceM8 Developer Portal** to get an App
    ID + Secret. Set:
-   - Activation URL: `https://servicem8-read-receipts-mobile.phill-abb.workers.dev/install`
-   - Callback URL: `https://servicem8-read-receipts-mobile.phill-abb.workers.dev/oauth/callback`
+   - Add-on Type: **External Integration**. Not "Self-Hosted Web Service
+     Function" -- that type's Callback URL field is for add-on *Action*
+     events (an HTTP POST carrying a JWT signed with the App Secret), not
+     for OAuth. This add-on declares no actions, so nothing would ever call
+     it.
+   - Addon Manifest: upload `addon-manifest.json`.
+   - Addon Activation URL: `https://servicem8-read-receipts-mobile.phill-abb.workers.dev/install`
    - Scopes: `read_email publish_job_notes`
+
+   There is no portal field for the OAuth callback and none is needed:
+   ServiceM8 takes `redirect_uri` as a query parameter on the authorize URL,
+   which `buildAuthorizeUrl` in `src/servicem8-oauth.js` already sets to
+   `<origin>/oauth/callback`.
 
 2. **Set the two secrets** on the deployed Worker (Cloudflare dashboard ->
    Workers -> this worker -> Settings -> Variables, or `wrangler secret put`
@@ -49,9 +62,34 @@ The selection/formatting logic (`selectNewlyOpenedEmails`,
    up -- Cloudflare dashboard -> Workers & Pages -> Create -> Connect to Git
    -> this repo.
 
-4. **Install it**: once deployed, visit the Worker's `/install` URL (or the
+4. ~~**Apply the schema** to the remote D1 database.~~ Done -- see
+   "Already provisioned" above. (Had this been skipped, `/install` would
+   have completed the whole OAuth handshake and then failed on the
+   callback's `INSERT INTO tenants`, showing only "Installation failed --
+   please try again".)
+
+5. **Install it**: once deployed, visit the Worker's `/install` URL (or the
    Developer Portal's Private Add-on Install URL) from within your
    ServiceM8 account.
+
+## Current status
+
+Deployed (2026-09-05). The Worker `servicem8-read-receipts-mobile` is live and
+serving the bundle built from `src/`, and the D1 schema is applied. No tenant
+has installed yet -- `tenants`, `oauth_tokens` and `notified_emails` are all
+empty, so the cron runs and finds nothing to do.
+
+Left to do: confirm `SERVICEM8_APP_ID` and `SERVICEM8_APP_SECRET` are set as
+Worker secrets (they can't be read back through the API, so the first
+`/install` is the real test), upload `addon-manifest.json` in the Developer
+Portal, then install.
+
+One trap worth remembering if this is ever rewired: point Workers Builds at a
+Worker whose name matches `wrangler.jsonc`. Aiming it at an existing Worker
+makes Cloudflare suggest renaming `wrangler.jsonc` to match *that* Worker
+instead -- taking the suggestion moves the add-on to a different
+`workers.dev` hostname and breaks the Activation URL and `iconURL` registered
+in the Developer Portal. That mismatch is what failed the first build here.
 
 ## One thing still flagged as unverified
 
