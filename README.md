@@ -26,10 +26,12 @@ The selection/formatting logic (`selectNewlyOpenedEmails`,
 
 ## Already provisioned
 
-- D1 database `read-receipts-mobile-db` exists and its `database_id` is
-  already wired into `wrangler.jsonc`. The **schema has not been applied
-  yet** -- the database was still reporting 0 tables as of 2026-09-05, so
-  `npm run db:init:remote` is a required step below, not an optional one.
+- D1 database `read-receipts-mobile-db` exists, its `database_id` is wired
+  into `wrangler.jsonc`, and the schema **has been applied** (2026-09-05):
+  `tenants`, `oauth_tokens`, `notified_emails` and
+  `idx_notified_emails_tenant` are all present. Re-running
+  `npm run db:init:remote` is harmless -- every statement is
+  `CREATE ... IF NOT EXISTS`.
 
 ## Still needed before this can go live
 
@@ -60,16 +62,11 @@ The selection/formatting logic (`selectNewlyOpenedEmails`,
    up -- Cloudflare dashboard -> Workers & Pages -> Create -> Connect to Git
    -> this repo.
 
-4. **Apply the schema** to the remote D1 database (see above -- this has
-   not been done yet):
-
-   ```
-   npm run db:init:remote
-   ```
-
-   Skipping this makes `/install` fail at the very last step: the OAuth
-   callback's `INSERT INTO tenants` has no table to insert into, and the
-   user sees "Installation failed -- please try again".
+4. ~~**Apply the schema** to the remote D1 database.~~ Done -- see
+   "Already provisioned" above. (Had this been skipped, `/install` would
+   have completed the whole OAuth handshake and then failed on the
+   callback's `INSERT INTO tenants`, showing only "Installation failed --
+   please try again".)
 
 5. **Install it**: once deployed, visit the Worker's `/install` URL (or the
    Developer Portal's Private Add-on Install URL) from within your
@@ -82,6 +79,13 @@ serves Cloudflare's "There is nothing here yet" placeholder, and no Worker by
 that name exists in the account -- so step 3 (Workers Builds, or a
 `wrangler deploy` from an authenticated machine) has to happen before the
 add-on can be installed or its `iconURL` can resolve.
+
+When wiring up Workers Builds, make sure it targets a **new** Worker that
+`wrangler.jsonc` names `servicem8-read-receipts-mobile`. Pointing the build
+at an existing Worker makes Cloudflare suggest renaming `wrangler.jsonc` to
+match it -- taking that suggestion would move the add-on to a different
+`workers.dev` hostname and break the Activation URL and `iconURL` already
+registered in the ServiceM8 Developer Portal.
 
 ## One thing still flagged as unverified
 
