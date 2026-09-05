@@ -5,6 +5,15 @@
   "compatibility_date": "2026-08-19",
   "compatibility_flags": ["nodejs_compat"],
   "workers_dev": true,
+  // The ServiceM8 App ID is a public client identifier -- it travels in the
+  // authorize URL in the user's address bar, so there is nothing to protect
+  // and no reason to make it a dashboard secret. Only SERVICEM8_APP_SECRET
+  // is sensitive; set that one with `wrangler secret put` or in the
+  // dashboard under Settings > Variables and Secrets.
+  "vars": {
+    "SERVICEM8_APP_ID": "787326"
+  },
+
   "assets": {
     "directory": "./public",
     "binding": "ASSETS"
