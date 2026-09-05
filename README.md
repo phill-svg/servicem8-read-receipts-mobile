@@ -74,18 +74,22 @@ The selection/formatting logic (`selectNewlyOpenedEmails`,
 
 ## Current status
 
-Not deployed. `https://servicem8-read-receipts-mobile.phill-abb.workers.dev/install`
-serves Cloudflare's "There is nothing here yet" placeholder, and no Worker by
-that name exists in the account -- so step 3 (Workers Builds, or a
-`wrangler deploy` from an authenticated machine) has to happen before the
-add-on can be installed or its `iconURL` can resolve.
+Deployed (2026-09-05). The Worker `servicem8-read-receipts-mobile` is live and
+serving the bundle built from `src/`, and the D1 schema is applied. No tenant
+has installed yet -- `tenants`, `oauth_tokens` and `notified_emails` are all
+empty, so the cron runs and finds nothing to do.
 
-When wiring up Workers Builds, make sure it targets a **new** Worker that
-`wrangler.jsonc` names `servicem8-read-receipts-mobile`. Pointing the build
-at an existing Worker makes Cloudflare suggest renaming `wrangler.jsonc` to
-match it -- taking that suggestion would move the add-on to a different
-`workers.dev` hostname and break the Activation URL and `iconURL` already
-registered in the ServiceM8 Developer Portal.
+Left to do: confirm `SERVICEM8_APP_ID` and `SERVICEM8_APP_SECRET` are set as
+Worker secrets (they can't be read back through the API, so the first
+`/install` is the real test), upload `addon-manifest.json` in the Developer
+Portal, then install.
+
+One trap worth remembering if this is ever rewired: point Workers Builds at a
+Worker whose name matches `wrangler.jsonc`. Aiming it at an existing Worker
+makes Cloudflare suggest renaming `wrangler.jsonc` to match *that* Worker
+instead -- taking the suggestion moves the add-on to a different
+`workers.dev` hostname and breaks the Activation URL and `iconURL` registered
+in the Developer Portal. That mismatch is what failed the first build here.
 
 ## One thing still flagged as unverified
 
