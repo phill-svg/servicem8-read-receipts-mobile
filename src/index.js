@@ -15,6 +15,7 @@ import { randomId, escapeHtml } from "./util.js";
 import { buildAuthorizeUrl, exchangeCodeForTokens, storeTokens } from "./servicem8-oauth.js";
 import { pollAllTenants, pollTenantForReadReceipts } from "./read-receipts.js";
 import { manualRunStartedRecently } from "./diagnostics.js";
+import { probeEmailRequests } from "./servicem8-api.js";
 
 async function handleInstallStart(request, env) {
   const url = new URL(request.url);
@@ -163,6 +164,21 @@ export default {
           return json({ error: "A manual poll just ran -- wait 30s before triggering another." }, 429);
         }
         return json(await pollAllTenants(env, { source: "manual" }));
+      }
+
+      // Answers "is /email.json capped at 1000, and how do we page past it?"
+      // against the live account. Read-only -- it posts nothing and writes
+      // nothing. Compare the counts and the first/last uuids: a parameter that
+      // 400s is unsupported, and one that's accepted but ignored comes back
+      // with the same uuids as the unparameterised call.
+      if (url.pathname === "/debug/probe-emails" && url.searchParams.get("tenant")) {
+        const probes = await probeEmailRequests(env, url.searchParams.get("tenant"), [
+          "",
+          "%24top=5",
+          "%24top=1000&%24skip=1000",
+          "%24filter=" + encodeURIComponent("opened eq '1'"),
+        ]);
+        return json(probes);
       }
 
       // Single-tenant variant, for when only one of several tenants misbehaves.
