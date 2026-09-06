@@ -110,6 +110,17 @@ system working, not failing -- open an email after it and the next poll (within
 To deliberately replay a tenant's backlog, delete its `tenant_baselines` row
 and its `notified_emails` rows, then poll again.
 
+Seeding writes in batches of 50. That's not premature optimisation: the first
+real seeding run wrote 645 rows one at a time, took 2m39s, and the Worker was
+killed before it could finish recording the run in `poll_runs` (runs 7 and 9
+are still sitting there with `finished_at` NULL -- the "started but never
+completed" state that table exists to make visible). Batched, the same backlog
+is 13 round trips.
+
+The `notified_emails` rows are written before the `tenant_baselines` row, so a
+seeding run that dies partway is simply finished by the next poll -- the rows
+already down are skipped, and nothing in the backlog is ever notified.
+
 ## If a tenant needs reinstalling
 
 A refresh token ServiceM8 rejects outright (any 4xx) is gone for good, so the
@@ -130,6 +141,16 @@ already handled.
   needs an account identifier from ServiceM8.
 - **The OAuth `state` parameter is generated but never validated** on the
   callback. It should be stored at `/install` and checked on return.
+
+- **The two installed tenants do not see the same account.** On the first
+  successful poll (2026-09-06) tenant `146bd1d0...` scanned 3 emails and seeded
+  2, while `d3b1d07c...` seeded 645. If both were meant to be the same
+  ServiceM8 account they would see identical data, so one of them -- almost
+  certainly the earlier `146bd1d0...`, installed at 14:49 and superseded 20
+  minutes later -- is a stray from a first attempt. It costs an extra full
+  `/email.json` fetch every 10 minutes and posts nothing useful. Confirm which
+  is live before removing the other:
+  `UPDATE tenants SET status = 'uninstalled', uninstalled_at = <now> WHERE tenant_id = '...'`.
 
 ## Setup checklist
 

@@ -1,7 +1,12 @@
-// Just enough of the D1 prepare/bind/run/all/first surface to exercise the
-// poller end to end. Statements are matched on a distinctive fragment of their
-// SQL -- crude, but it keeps the fake honest: an unrecognised query throws
-// rather than quietly returning nothing and passing a test it shouldn't.
+// Just enough of the D1 prepare/bind/run/all/first/batch surface to exercise
+// the poller end to end. Statements are matched on a distinctive fragment of
+// their SQL -- crude, but it keeps the fake honest: an unrecognised query
+// throws rather than quietly returning nothing and passing a test it shouldn't.
+//
+// bind() returns a *new* statement rather than mutating this one, matching real
+// D1. That matters: batching prepares a statement once and binds it per row, so
+// a fake that mutated in place would write the same row 50 times and the tests
+// would still pass.
 export function fakeDb({ tenants = [], notified = [], baselined = [] } = {}) {
   const state = {
     tenants: tenants.map((t) => ({ status: "active", ...t })),
@@ -9,15 +14,13 @@ export function fakeDb({ tenants = [], notified = [], baselined = [] } = {}) {
     baselined: [...baselined],
     runs: [],
     nextRunId: 1,
+    batches: [], // sizes of each batch() call, so tests can assert on chunking
   };
 
-  function prepare(sql) {
-    let args = [];
-    const stmt = {
-      bind(...a) {
-        args = a;
-        return stmt;
-      },
+  function statement(sql, args) {
+    return {
+      bind: (...a) => statement(sql, a),
+
       async run() {
         if (sql.includes("INSERT INTO poll_runs")) {
           const id = state.nextRunId++;
@@ -46,6 +49,7 @@ export function fakeDb({ tenants = [], notified = [], baselined = [] } = {}) {
         }
         throw new Error(`fakeDb: unexpected run() for ${sql}`);
       },
+
       async all() {
         if (sql.includes("SELECT email_uuid FROM notified_emails")) {
           return { results: state.notified.map((n) => ({ email_uuid: n.email_uuid })) };
@@ -55,6 +59,7 @@ export function fakeDb({ tenants = [], notified = [], baselined = [] } = {}) {
         }
         throw new Error(`fakeDb: unexpected all() for ${sql}`);
       },
+
       async first() {
         if (sql.includes("FROM tenant_baselines")) {
           return state.baselined.includes(args[0]) ? { tenant_id: args[0] } : null;
@@ -62,8 +67,16 @@ export function fakeDb({ tenants = [], notified = [], baselined = [] } = {}) {
         throw new Error(`fakeDb: unexpected first() for ${sql}`);
       },
     };
-    return stmt;
   }
 
-  return { prepare, state };
+  return {
+    state,
+    prepare: (sql) => statement(sql, []),
+    async batch(statements) {
+      state.batches.push(statements.length);
+      const results = [];
+      for (const st of statements) results.push(await st.run());
+      return results;
+    },
+  };
 }

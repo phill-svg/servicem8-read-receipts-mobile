@@ -209,3 +209,33 @@ test("email.json is fetched with no $filter at all", async () => {
   assert.equal(called[0], "https://api.servicem8.com/api_1.0/email.json");
   assert.doesNotMatch(called[0], /filter/i);
 });
+
+test("a large backlog is seeded in batches, not one write per email", async () => {
+  // A real account's 645-email backlog took 2m39s written one row at a time,
+  // and the Worker was killed before it could finish recording the run.
+  const db = fakeDb({ tenants: [{ tenant_id: "t1" }] });
+  const emails = Array.from({ length: 645 }, (_, i) => openedEmail(`e${i}`, `job-${i}`));
+
+  const result = await pollTenantForReadReceipts({ DB: db }, "t1", { api: fakeApi({ emails }) });
+
+  assert.equal(result.seeded, 645);
+  assert.equal(db.state.notified.length, 645, "every email is recorded exactly once");
+  assert.equal(new Set(db.state.notified.map((n) => n.email_uuid)).size, 645, "each row is distinct");
+  assert.equal(db.state.batches.length, 13, "645 rows in chunks of 50");
+  assert.ok(Math.max(...db.state.batches) <= 50);
+});
+
+test("seeding interrupted partway is finished by the next poll, still posting nothing", async () => {
+  const db = fakeDb({
+    tenants: [{ tenant_id: "t1" }],
+    notified: [{ tenant_id: "t1", email_uuid: "e0" }, { tenant_id: "t1", email_uuid: "e1" }],
+  }); // rows landed, but the tenant_baselines row never did
+  const emails = [openedEmail("e0"), openedEmail("e1"), openedEmail("e2", "job-2")];
+  const api = fakeApi({ emails });
+
+  const result = await pollTenantForReadReceipts({ DB: db }, "t1", { api });
+
+  assert.equal(api.posted.length, 0, "the backlog is never notified retroactively");
+  assert.equal(result.seeded, 1, "only the row that was still missing");
+  assert.deepEqual(db.state.baselined, ["t1"]);
+});
