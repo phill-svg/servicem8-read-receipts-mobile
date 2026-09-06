@@ -27,23 +27,25 @@ async function sm8Fetch(env, tenantId, path, { retries = 4 } = {}) {
   }
 }
 
-// ServiceM8's filter language only supports eq/ne/gt/lt, combined with " and ".
-function odataFilter(expr) {
-  return `%24filter=${encodeURIComponent(expr)}`;
-}
-
-// All emails sent from this account, optionally only those touched since a
-// given Date -- unlike a job-scoped fetch this doesn't require already
-// knowing which jobs to check, which is what lets the poller find newly-
-// opened emails account-wide. NEEDS LIVE CONFIRMATION: assumes email.json
-// accepts an edit_date filter like other ServiceM8 objects generally do; if
-// it's rejected or silently ignored, this just falls back to fetching every
-// email on the account each run (safe, just less efficient -- worth
-// tightening once confirmed).
-export async function listRecentEmails(env, tenantId, { since } = {}) {
-  if (!since) return sm8Fetch(env, tenantId, `/email.json`);
-  const cutoff = since.toISOString().slice(0, 19).replace("T", " ");
-  return sm8Fetch(env, tenantId, `/email.json?${odataFilter(`edit_date gt '${cutoff}'`)}`);
+// All emails sent from this account.
+//
+// This deliberately fetches unfiltered. The original version bounded each poll
+// with `$filter=edit_date gt '<cutoff>'`, which ServiceM8 rejects outright:
+//
+//   400 {"errorCode":400,"message":"Unsupported $filter field: edit_date"}
+//
+// Confirmed live 2026-09-06 -- that 400 was what stopped every single poll,
+// from install onwards. ServiceM8 doesn't document which fields are filterable
+// per object, and the failure mode of guessing wrong is asymmetric: a rejected
+// filter is loud (a 400, like the one above), but a filter that's *accepted*
+// and matches nothing is silent -- the poller would look healthy and quietly
+// never post a note again. Fetching too much is the safe direction to be wrong
+// in, and the dedupe table already makes a wide scan harmless.
+//
+// poll_runs.scanned records how wide it actually is. Narrow this only with
+// that number in hand, and only to a filter proven against a live account.
+export async function listRecentEmails(env, tenantId) {
+  return sm8Fetch(env, tenantId, `/email.json`);
 }
 
 // Posts a Job Note -- shows up in the Job Diary on both desktop AND mobile.

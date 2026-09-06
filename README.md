@@ -33,34 +33,40 @@ The selection/formatting logic (`selectNewlyOpenedEmails`,
   `npm run db:init:remote` is harmless -- every statement is
   `CREATE ... IF NOT EXISTS`.
 
-## Current status (2026-09-06)
+## What was wrong (resolved 2026-09-06)
 
-Deployed, installed, and **not posting any notes**. What the live D1 database
-says:
+The add-on was deployed and installed for 22 hours and posted nothing. The
+cause, once `poll_runs` could show it:
 
-- Worker `servicem8-read-receipts-mobile` is deployed and serving the bundle
-  built from `src/` (last deploy 2026-09-05 14:48 UTC).
-- The schema is applied, including `poll_runs` (added 2026-09-06).
-- **Two tenants installed** -- 2026-09-05 14:49:35 and 15:09:58 UTC -- both
-  with scope `read_email publish_job_notes`. So `SERVICEM8_APP_ID` and
-  `SERVICEM8_APP_SECRET` are set correctly on the Worker: the OAuth code
-  exchange cannot succeed otherwise. That question is settled.
-- `notified_emails` is **empty**. No read receipt has ever been posted.
-- `oauth_tokens.updated_at` still equals `installed_at` for both tenants, and
-  ServiceM8 issues 1-hour access tokens. **No token has ever been refreshed**,
-  so nothing has successfully called the ServiceM8 API since roughly an hour
-  after install.
+```
+GET /email.json?$filter=edit_date gt '2026-08-07 13:27:57'
+400 {"errorCode":400,"message":"Unsupported $filter field: edit_date"}
+```
 
-That last point narrows the fault to one of two things, which until now looked
-identical from the outside because both leave no trace:
+**ServiceM8 does not accept an `edit_date` filter on `email.json`.** Every poll
+had 400'd since install. This was the one assumption the original build flagged
+as unverified, and it was wrong -- see "Filtering `email.json`" below.
 
-1. **The cron never fires.** Check the Worker's Triggers tab in the Cloudflare
-   dashboard actually lists `*/10 * * * *`. A Workers Builds deploy that
-   doesn't apply `triggers.crons` leaves the Worker live and reachable but
-   never scheduled -- exactly what the symptoms look like.
-2. **Every token refresh fails.** ServiceM8 rotates refresh tokens, and the
-   second install may have revoked the first grant. A refresh that 4xxs leaves
-   the tenant permanently stuck.
+It took so long to find because nothing recorded it. Both plausible causes --
+"the cron never fires" and "every poll fails" -- left exactly the same trace,
+which was none: no notes, and `oauth_tokens.updated_at` frozen at install time,
+because a poll that dies before its first API call never refreshes a token
+either. `poll_runs` exists so that never happens again.
+
+Ruled out along the way, all confirmed rather than assumed:
+
+- `SERVICEM8_APP_ID` / `SERVICEM8_APP_SECRET` are set correctly -- two OAuth
+  code exchanges succeeded, which is impossible otherwise.
+- The cron trigger is registered (`*/10 * * * *` in the Worker's Triggers tab)
+  and fires -- confirmed in Workers Logs with `eventType: scheduled`.
+- Token refresh works. The frozen `updated_at` was a symptom of the 400, not a
+  second fault: the first manual poll refreshed both tenants immediately.
+
+Two real bugs were found while tracing it, both fixed before they could bite:
+notes were deduped per tenant when every `/install` visit mints a new tenant id
+(so the two installed tenants would have posted every read receipt twice), and
+the first successful poll would have dumped the entire backlog onto live
+customer jobs.
 
 ## Diagnosing it
 
@@ -90,9 +96,9 @@ Set a `DEBUG_KEY` secret on the Worker to require `?key=...` on them.
 
 ## The first poll posts nothing, on purpose
 
-The poller looks back 30 days and `notified_emails` is empty, so the first
-successful poll would otherwise post a note for every email opened in the past
-month -- dozens at once, onto real customer jobs, with no undo. Instead a
+The poll is unfiltered, so the first successful one sees every email the
+account has ever opened -- and would otherwise post a note for all of them at
+once, onto real customer jobs, with no undo. Instead a
 tenant's first successful poll records what it found in `notified_emails`,
 writes a `tenant_baselines` row, and posts nothing; every poll after that
 notifies normally.
@@ -125,7 +131,7 @@ already handled.
 - **The OAuth `state` parameter is generated but never validated** on the
   callback. It should be stored at `/install` and checked on return.
 
-## Still needed before this can go live
+## Setup checklist
 
 1. **Register the add-on in the ServiceM8 Developer Portal** to get an App
    ID + Secret. Set:
@@ -144,19 +150,23 @@ already handled.
    `<origin>/oauth/callback`.
 
 2. ~~**Set the two secrets** on the deployed Worker.~~ Done -- proven by two
-   successful OAuth exchanges, see "Current status".
+   successful OAuth exchanges.
 
-3. ~~**Connect this repo to Cloudflare Workers Builds**~~ Done -- a push to a
-   branch on 2026-09-06 produced a Workers Build and a preview deployment, so
-   the Git integration is live. Pushes to `main` deploy to production; pushes
-   to other branches upload a preview version only, which is why a branch
-   preview never runs the cron. **Still confirm the Triggers tab shows
-   `*/10 * * * *`** -- that's cause 1 above, and Workers Builds being
-   connected doesn't prove the schedule was applied.
+3. ~~**Connect this repo to Cloudflare Workers Builds**~~ Done -- the Git
+   integration is live. Pushes to `main` deploy to production; pushes to any
+   other branch upload a preview version only, which is why a branch preview
+   never runs the cron. Handy while debugging: a preview URL still shares the
+   production D1 binding and secrets, so `/debug/poll-all` on a branch preview
+   exercises the real thing without touching the production deployment.
 
 4. ~~**Apply the schema** to the remote D1 database.~~ Done.
 
-5. ~~**Install it.**~~ Done twice -- see "Current status".
+5. ~~**Install it.**~~ Done twice (2026-09-05). Twice was one time too many --
+   see "Known gaps".
+
+6. ~~**Confirm the cron is registered and firing.**~~ Done -- `*/10 * * * *`
+   shows in the Worker's Triggers tab, and Workers Logs shows the
+   `eventType: scheduled` invocations.
 
 One trap worth remembering if this is ever rewired: point Workers Builds at a
 Worker whose name matches `wrangler.jsonc`. Aiming it at an existing Worker
@@ -165,16 +175,24 @@ instead -- taking the suggestion moves the add-on to a different
 `workers.dev` hostname and breaks the Activation URL and `iconURL` registered
 in the Developer Portal. That mismatch is what failed the first build here.
 
-## One thing still flagged as unverified
+## Filtering `email.json`
 
-Called out inline in the code (`grep -rn "NEEDS LIVE CONFIRMATION"`):
+Confirmed live 2026-09-06: **`edit_date` is not a supported `$filter` field on
+`email.json`.** ServiceM8 answers `400 Unsupported $filter field: edit_date`.
+The original build assumed it worked like other ServiceM8 objects, and that
+assumption is what kept the add-on silent from the day it was installed.
 
-- **`edit_date` filter on `email.json`** (`src/servicem8-api.js`): assumed to
-  work like other ServiceM8 objects, to bound each poll to recently-touched
-  emails. If it's rejected or ignored, the poller still works correctly
-  (the `notified_emails` dedupe table prevents duplicate notes either way) --
-  it would just be scanning more emails per run than necessary. Worth
-  checking Worker logs once live.
+`listRecentEmails` therefore sends no filter at all. Which fields *are*
+filterable isn't documented per object, and guessing wrong is asymmetric:
+
+- A **rejected** filter is loud -- a 400, like the one above.
+- An **accepted** filter that matches nothing is silent. The poller would look
+  perfectly healthy and quietly never post another note.
+
+Fetching too much is the safe direction to be wrong in, and the dedupe table
+already makes a wide scan harmless. `poll_runs.scanned` records how wide it
+actually is. Narrow it only with that number in hand, and only to a filter
+proven against a live account.
 
 (The OAuth scope for creating notes -- `publish_job_notes` -- is confirmed
 against ServiceM8's own published scope list, not a guess.)
