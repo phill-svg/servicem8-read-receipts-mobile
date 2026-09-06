@@ -111,11 +111,15 @@ To deliberately replay a tenant's backlog, delete its `tenant_baselines` row
 and its `notified_emails` rows, then poll again.
 
 Seeding writes in batches of 50. That's not premature optimisation: the first
-real seeding run wrote 645 rows one at a time, took 2m39s, and the Worker was
-killed before it could finish recording the run in `poll_runs` (runs 7 and 9
-are still sitting there with `finished_at` NULL -- the "started but never
-completed" state that table exists to make visible). Batched, the same backlog
-is 13 round trips.
+real seeding run wrote 645 rows one at a time and took **2m39s** (`poll_runs`
+row 9: 159,429ms). It did complete -- an earlier note here said the Worker was
+killed mid-run, which was wrong; that reading was taken while the run was still
+in flight and `finished_at` was still NULL. But 2m39s of a 10-minute cron spent
+on one tenant's first poll is far too close to the edge, and a larger backlog
+would have crossed it. Batched, the same 645 rows are 13 round trips.
+
+For contrast, a steady-state run scans 1003 records across both tenants in
+about 5.5 seconds.
 
 The `notified_emails` rows are written before the `tenant_baselines` row, so a
 seeding run that dies partway is simply finished by the next poll -- the rows
