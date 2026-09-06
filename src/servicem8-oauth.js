@@ -22,7 +22,27 @@ export function buildAuthorizeUrl({ appId, redirectUri, state }) {
   return url.toString();
 }
 
+// Carries the HTTP status through so callers can tell "ServiceM8 is having a
+// moment" (5xx -- worth retrying next cron tick) apart from "this grant is
+// gone" (4xx -- retrying forever is pointless, the tenant has to reinstall).
+export class ServiceM8TokenError extends Error {
+  constructor(message, { status }) {
+    super(message);
+    this.name = "ServiceM8TokenError";
+    this.status = status;
+    this.grantLost = status >= 400 && status < 500;
+  }
+}
+
 async function tokenRequest(env, body) {
+  if (!env.SERVICEM8_APP_ID || !env.SERVICEM8_APP_SECRET) {
+    // Worth its own message: a missing secret otherwise surfaces as an opaque
+    // "invalid_client" from ServiceM8, which sends you hunting in the wrong place.
+    throw new ServiceM8TokenError(
+      `ServiceM8 OAuth not configured: ${!env.SERVICEM8_APP_ID ? "SERVICEM8_APP_ID" : "SERVICEM8_APP_SECRET"} is unset on this Worker`,
+      { status: 500 }
+    );
+  }
   const res = await fetch(TOKEN_URL, {
     method: "POST",
     headers: { "Content-Type": "application/x-www-form-urlencoded" },
@@ -33,7 +53,9 @@ async function tokenRequest(env, body) {
     }),
   });
   if (!res.ok) {
-    throw new Error(`ServiceM8 OAuth token request failed: ${res.status} ${await res.text()}`);
+    throw new ServiceM8TokenError(`ServiceM8 OAuth token request failed: ${res.status} ${await res.text()}`, {
+      status: res.status,
+    });
   }
   return res.json();
 }

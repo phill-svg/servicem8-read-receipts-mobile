@@ -27,11 +27,81 @@ The selection/formatting logic (`selectNewlyOpenedEmails`,
 ## Already provisioned
 
 - D1 database `read-receipts-mobile-db` exists, its `database_id` is wired
-  into `wrangler.jsonc`, and the schema **has been applied** (2026-09-05):
-  `tenants`, `oauth_tokens`, `notified_emails` and
-  `idx_notified_emails_tenant` are all present. Re-running
+  into `wrangler.jsonc`, and the schema **has been applied**: `tenants`,
+  `oauth_tokens`, `notified_emails` and `idx_notified_emails_tenant`
+  (2026-09-05), plus `poll_runs` (2026-09-06). Re-running
   `npm run db:init:remote` is harmless -- every statement is
   `CREATE ... IF NOT EXISTS`.
+
+## Current status (2026-09-06)
+
+Deployed, installed, and **not posting any notes**. What the live D1 database
+says:
+
+- Worker `servicem8-read-receipts-mobile` is deployed and serving the bundle
+  built from `src/` (last deploy 2026-09-05 14:48 UTC).
+- The schema is applied, including `poll_runs` (added 2026-09-06).
+- **Two tenants installed** -- 2026-09-05 14:49:35 and 15:09:58 UTC -- both
+  with scope `read_email publish_job_notes`. So `SERVICEM8_APP_ID` and
+  `SERVICEM8_APP_SECRET` are set correctly on the Worker: the OAuth code
+  exchange cannot succeed otherwise. That question is settled.
+- `notified_emails` is **empty**. No read receipt has ever been posted.
+- `oauth_tokens.updated_at` still equals `installed_at` for both tenants, and
+  ServiceM8 issues 1-hour access tokens. **No token has ever been refreshed**,
+  so nothing has successfully called the ServiceM8 API since roughly an hour
+  after install.
+
+That last point narrows the fault to one of two things, which until now looked
+identical from the outside because both leave no trace:
+
+1. **The cron never fires.** Check the Worker's Triggers tab in the Cloudflare
+   dashboard actually lists `*/10 * * * *`. A Workers Builds deploy that
+   doesn't apply `triggers.crons` leaves the Worker live and reachable but
+   never scheduled -- exactly what the symptoms look like.
+2. **Every token refresh fails.** ServiceM8 rotates refresh tokens, and the
+   second install may have revoked the first grant. A refresh that 4xxs leaves
+   the tenant permanently stuck.
+
+## Diagnosing it
+
+`poll_runs` (see `src/diagnostics.js`) exists because Worker logs aren't
+reachable from everywhere this is maintained, but D1 always is. Every poll --
+cron or manual -- writes a row before it does anything, so an empty table is
+itself the answer to "is the cron firing?".
+
+- **In a browser:** `/debug/status` returns install state, whether each secret
+  is present, `last_cron_run`, and the last 15 runs with their errors. It
+  exposes no tokens and truncates tenant ids.
+- **Force a run now:** `/debug/poll-all` runs the exact code path the cron
+  runs and returns the result, rather than waiting up to 10 minutes.
+  Rate-limited to one manual run per 30 seconds.
+- **Straight from D1:**
+  `SELECT * FROM poll_runs ORDER BY id DESC LIMIT 20;`
+
+Both `/debug` routes are open by default -- deliberately, since they're the
+tool for triaging a deployment before anything else about it is known to work.
+Set a `DEBUG_KEY` secret on the Worker to require `?key=...` on them.
+
+## If a tenant needs reinstalling
+
+A refresh token ServiceM8 rejects outright (any 4xx) is gone for good, so the
+poller parks that tenant as `status = 'reauth_required'` and stops polling it
+rather than retrying every 10 minutes forever. The fix is to visit `/install`
+again. That's safe to do: notes are deduped account-wide by email UUID, not
+per tenant, so a replacement tenant will not re-notify anything the parked one
+already handled.
+
+## Known gaps
+
+- **Every `/install` visit creates a new tenant.** Nothing in ServiceM8's OAuth
+  response identifies the account, and this add-on declares no actions, so
+  there's no add-on JWT callback to resolve the real account UUID from (the
+  way `servicem8-renewal-autopilot` does). Installing twice therefore leaves
+  two tenant rows polling the same account. The account-wide dedupe means they
+  can't double-post, but they do double the API calls. Resolving this properly
+  needs an account identifier from ServiceM8.
+- **The OAuth `state` parameter is generated but never validated** on the
+  callback. It should be stored at `/install` and checked on return.
 
 ## Still needed before this can go live
 
@@ -51,38 +121,18 @@ The selection/formatting logic (`selectNewlyOpenedEmails`,
    which `buildAuthorizeUrl` in `src/servicem8-oauth.js` already sets to
    `<origin>/oauth/callback`.
 
-2. **Set the two secrets** on the deployed Worker (Cloudflare dashboard ->
-   Workers -> this worker -> Settings -> Variables, or `wrangler secret put`
-   if deploying from a machine with an authenticated `wrangler`):
-   - `SERVICEM8_APP_ID`
-   - `SERVICEM8_APP_SECRET`
+2. ~~**Set the two secrets** on the deployed Worker.~~ Done -- proven by two
+   successful OAuth exchanges, see "Current status".
 
 3. **Connect this repo to Cloudflare Workers Builds** (Git integration) so
    pushes auto-deploy, the same way `servicem8-renewal-autopilot` is wired
    up -- Cloudflare dashboard -> Workers & Pages -> Create -> Connect to Git
-   -> this repo.
+   -> this repo. **Confirm the Triggers tab shows the cron afterwards** --
+   see cause 1 above.
 
-4. ~~**Apply the schema** to the remote D1 database.~~ Done -- see
-   "Already provisioned" above. (Had this been skipped, `/install` would
-   have completed the whole OAuth handshake and then failed on the
-   callback's `INSERT INTO tenants`, showing only "Installation failed --
-   please try again".)
+4. ~~**Apply the schema** to the remote D1 database.~~ Done.
 
-5. **Install it**: once deployed, visit the Worker's `/install` URL (or the
-   Developer Portal's Private Add-on Install URL) from within your
-   ServiceM8 account.
-
-## Current status
-
-Deployed (2026-09-05). The Worker `servicem8-read-receipts-mobile` is live and
-serving the bundle built from `src/`, and the D1 schema is applied. No tenant
-has installed yet -- `tenants`, `oauth_tokens` and `notified_emails` are all
-empty, so the cron runs and finds nothing to do.
-
-Left to do: confirm `SERVICEM8_APP_ID` and `SERVICEM8_APP_SECRET` are set as
-Worker secrets (they can't be read back through the API, so the first
-`/install` is the real test), upload `addon-manifest.json` in the Developer
-Portal, then install.
+5. ~~**Install it.**~~ Done twice -- see "Current status".
 
 One trap worth remembering if this is ever rewired: point Workers Builds at a
 Worker whose name matches `wrangler.jsonc`. Aiming it at an existing Worker

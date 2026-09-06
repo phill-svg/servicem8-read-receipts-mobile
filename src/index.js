@@ -14,6 +14,7 @@
 import { randomId, escapeHtml } from "./util.js";
 import { buildAuthorizeUrl, exchangeCodeForTokens, storeTokens } from "./servicem8-oauth.js";
 import { pollAllTenants, pollTenantForReadReceipts } from "./read-receipts.js";
+import { manualRunStartedRecently } from "./diagnostics.js";
 
 async function handleInstallStart(request, env) {
   const url = new URL(request.url);
@@ -65,6 +66,84 @@ async function handleOAuthCallback(request, env) {
   return new Response(installedPageHtml(), { headers: { "Content-Type": "text/html" } });
 }
 
+const MANUAL_POLL_COOLDOWN_MS = 30_000;
+
+function json(body, status = 200) {
+  return new Response(JSON.stringify(body, null, 2), { status, headers: { "Content-Type": "application/json" } });
+}
+
+// The /debug routes expose no tokens and no customer data, but they do reveal
+// install state and let a stranger burn ServiceM8 API quota, so they can be
+// locked down by setting a DEBUG_KEY secret on the Worker. Unset (the default)
+// leaves them open -- which is what makes them usable for first-run triage
+// before anything else about the deployment is known to work.
+function debugAuthorized(env, url) {
+  if (!env.DEBUG_KEY) return true;
+  return url.searchParams.get("key") === env.DEBUG_KEY;
+}
+
+// Everything needed to tell a healthy install from a stalled one, in one page:
+// are the secrets set, did a tenant install, is the cron actually firing, and
+// what did the last few runs do. Tenant ids are truncated -- they're the only
+// identifying value here and nothing about triage needs the whole thing.
+async function handleDebugStatus(env) {
+  const shortId = (id) => (id ? `${String(id).slice(0, 8)}...` : null);
+  const out = {
+    now: new Date().toISOString(),
+    config: {
+      // Presence only -- never the values.
+      SERVICEM8_APP_ID: Boolean(env.SERVICEM8_APP_ID),
+      SERVICEM8_APP_SECRET: Boolean(env.SERVICEM8_APP_SECRET),
+      DEBUG_KEY: Boolean(env.DEBUG_KEY),
+    },
+  };
+
+  try {
+    const tenants = await env.DB.prepare(
+      `SELECT t.tenant_id, t.status, t.installed_at, o.access_token_expires_at, o.updated_at AS token_updated_at, o.scope
+         FROM tenants t LEFT JOIN oauth_tokens o USING (tenant_id) ORDER BY t.installed_at`
+    ).all();
+    out.tenants = (tenants.results || []).map((t) => ({
+      tenant_id: shortId(t.tenant_id),
+      status: t.status,
+      installed_at: new Date(t.installed_at).toISOString(),
+      scope: t.scope,
+      token_last_refreshed: t.token_updated_at ? new Date(t.token_updated_at).toISOString() : null,
+      access_token_expired: t.access_token_expires_at ? t.access_token_expires_at < Date.now() : null,
+    }));
+
+    const notes = await env.DB.prepare("SELECT COUNT(*) AS n FROM notified_emails").first();
+    out.notes_posted = notes ? notes.n : 0;
+
+    const lastCron = await env.DB.prepare(
+      "SELECT started_at, source FROM poll_runs WHERE source LIKE 'cron%' ORDER BY id DESC LIMIT 1"
+    ).first();
+    // The single most useful line here: if this stays null, the schedule isn't
+    // reaching the Worker and no amount of ServiceM8 debugging will help.
+    out.last_cron_run = lastCron ? { at: new Date(lastCron.started_at).toISOString(), source: lastCron.source } : null;
+
+    const runs = await env.DB.prepare(
+      `SELECT started_at, finished_at, source, tenant_id, scanned, notified, ok, error
+         FROM poll_runs ORDER BY id DESC LIMIT 15`
+    ).all();
+    out.recent_runs = (runs.results || []).map((r) => ({
+      at: new Date(r.started_at).toISOString(),
+      source: r.source,
+      tenant_id: shortId(r.tenant_id),
+      completed: Boolean(r.finished_at),
+      ok: Boolean(r.ok),
+      scanned: r.scanned,
+      notified: r.notified,
+      error: r.error,
+    }));
+  } catch (err) {
+    out.error = `Reading diagnostics failed -- has schema.sql been applied? ${err}`;
+    return json(out, 500);
+  }
+
+  return json(out);
+}
+
 export default {
   async fetch(request, env, ctx) {
     const url = new URL(request.url);
@@ -72,11 +151,24 @@ export default {
     if (url.pathname === "/install") return handleInstallStart(request, env);
     if (url.pathname === "/oauth/callback") return handleOAuthCallback(request, env);
 
-    // Manual trigger for testing against one tenant without waiting for cron.
-    // Not linked from anywhere -- only useful with the tenant_id in hand.
-    if (url.pathname === "/debug/poll" && url.searchParams.get("tenant")) {
-      const result = await pollTenantForReadReceipts(env, url.searchParams.get("tenant"));
-      return new Response(JSON.stringify(result), { headers: { "Content-Type": "application/json" } });
+    if (url.pathname.startsWith("/debug/")) {
+      if (!debugAuthorized(env, url)) return json({ error: "Not authorised" }, 403);
+
+      if (url.pathname === "/debug/status") return handleDebugStatus(env);
+
+      // Runs the exact code path the cron runs, on demand -- the fastest way to
+      // find out what a poll actually does without waiting up to 10 minutes.
+      if (url.pathname === "/debug/poll-all") {
+        if (await manualRunStartedRecently(env.DB, MANUAL_POLL_COOLDOWN_MS)) {
+          return json({ error: "A manual poll just ran -- wait 30s before triggering another." }, 429);
+        }
+        return json(await pollAllTenants(env, { source: "manual" }));
+      }
+
+      // Single-tenant variant, for when only one of several tenants misbehaves.
+      if (url.pathname === "/debug/poll" && url.searchParams.get("tenant")) {
+        return json(await pollTenantForReadReceipts(env, url.searchParams.get("tenant"), { source: "manual" }));
+      }
     }
 
     if (env.ASSETS) return env.ASSETS.fetch(request);
@@ -84,6 +176,8 @@ export default {
   },
 
   async scheduled(event, env, ctx) {
-    ctx.waitUntil(pollAllTenants(env));
+    // event.cron is recorded so poll_runs shows which schedule fired, which
+    // also proves the trigger is wired up at all.
+    ctx.waitUntil(pollAllTenants(env, { source: `cron:${event.cron || "?"}` }));
   },
 };
