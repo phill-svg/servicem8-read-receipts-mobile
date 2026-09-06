@@ -55,19 +55,30 @@ async function hasBaseline(db, tenantId) {
   return Boolean(row);
 }
 
+// One D1 round trip per email is too slow to survive: seeding a real account's
+// 645-email backlog that way took 2m39s and the Worker was killed before it
+// could even finish recording the run. Batched, that's 13 round trips instead
+// of 645. Chunked rather than sent as one batch so a large backlog can't
+// exceed D1's per-batch limits.
+const BASELINE_CHUNK = 50;
+
 // Marks everything the first poll found as already handled, without posting.
-// Written before the baseline row itself, so a crash midway just means the
-// next poll finishes seeding rather than notifying the backlog.
+// The notified_emails rows go down before the tenant_baselines row, so a run
+// killed midway just means the next poll picks up where it left off -- the
+// rows already written are skipped, and no note is ever posted for them.
 async function recordBaseline(db, tenantId, emails) {
-  for (const email of emails) {
-    await db
-      .prepare(
-        `INSERT INTO notified_emails (tenant_id, email_uuid, job_uuid, opened_at, notified_at)
-         VALUES (?, ?, ?, ?, ?)
-         ON CONFLICT(tenant_id, email_uuid) DO NOTHING`
-      )
-      .bind(tenantId, email.uuid, email.related_object_uuid, email.first_opened_at || null, Date.now())
-      .run();
+  const insert = db.prepare(
+    `INSERT INTO notified_emails (tenant_id, email_uuid, job_uuid, opened_at, notified_at)
+     VALUES (?, ?, ?, ?, ?)
+     ON CONFLICT(tenant_id, email_uuid) DO NOTHING`
+  );
+  for (let i = 0; i < emails.length; i += BASELINE_CHUNK) {
+    const now = Date.now();
+    await db.batch(
+      emails
+        .slice(i, i + BASELINE_CHUNK)
+        .map((email) => insert.bind(tenantId, email.uuid, email.related_object_uuid, email.first_opened_at || null, now))
+    );
   }
   await db
     .prepare("INSERT INTO tenant_baselines (tenant_id, baselined_at, suppressed) VALUES (?, ?, ?) ON CONFLICT(tenant_id) DO NOTHING")
