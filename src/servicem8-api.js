@@ -9,13 +9,15 @@ const API_BASE = "https://api.servicem8.com/api_1.0";
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
+// Returns the decoded body alongside the response headers -- paging is driven
+// by a header, not by anything in the body.
 async function sm8Fetch(env, tenantId, path, { retries = 4 } = {}) {
   for (let attempt = 0; ; attempt++) {
     const token = await getValidAccessToken(env, tenantId);
     const res = await fetch(`${API_BASE}${path}`, {
       headers: { Authorization: `Bearer ${token}`, Accept: "application/json" },
     });
-    if (res.ok) return res.json();
+    if (res.ok) return { data: await res.json(), headers: res.headers };
     const retryable = res.status === 429 || res.status >= 500;
     if (retryable && attempt < retries) {
       const retryAfter = Number(res.headers.get("retry-after"));
@@ -27,33 +29,58 @@ async function sm8Fetch(env, tenantId, path, { retries = 4 } = {}) {
   }
 }
 
-// All emails sent from this account.
+// ServiceM8 caps /email.json at 1000 records per response and pages with a
+// cursor, not with $top/$skip. Probed against the live account 2026-09-06:
 //
-// This deliberately fetches unfiltered. The original version bounded each poll
-// with `$filter=edit_date gt '<cutoff>'`, which ServiceM8 rejects outright:
+//   /email.json                        200, 1000 rows
+//   /email.json?$top=5                 200, 1000 rows, identical first/last uuid
+//   /email.json?$top=1000&$skip=1000   200, 1000 rows, identical first/last uuid
+//   /email.json?$filter=opened eq '1'  400 Unsupported $filter field: opened
+//
+// $top and $skip are accepted and silently ignored. That is the dangerous shape
+// of failure: unpaged, the poller would sit on exactly 1000 records looking
+// perfectly healthy while never seeing the 1001st.
+export const EMAIL_PAGE_CAP = 1000;
+
+// Bounds the walk at 20k emails so a pathological account can't spin the Worker
+// until it's killed.
+const MAX_EMAIL_PAGES = 20;
+
+// Every email on the account, walked page by page.
+//
+// No $filter is sent. The original version bounded each poll with
+// `$filter=edit_date gt '<cutoff>'`, which ServiceM8 rejects outright:
 //
 //   400 {"errorCode":400,"message":"Unsupported $filter field: edit_date"}
 //
-// Confirmed live 2026-09-06 -- that 400 was what stopped every single poll,
-// from install onwards. ServiceM8 doesn't document which fields are filterable
-// per object, and the failure mode of guessing wrong is asymmetric: a rejected
-// filter is loud (a 400, like the one above), but a filter that's *accepted*
-// and matches nothing is silent -- the poller would look healthy and quietly
-// never post a note again. Fetching too much is the safe direction to be wrong
-// in, and the dedupe table already makes a wide scan harmless.
+// Confirmed live 2026-09-06 -- that 400 was what stopped every single poll from
+// install onwards. `opened` is rejected the same way, so there is no filter
+// available that would narrow this to just the records we care about.
 //
-// poll_runs.scanned records how wide it actually is. Narrow this only with
-// that number in hand, and only to a filter proven against a live account.
+// The loop is driven entirely by the x-next-cursor response header, which makes
+// it safe against being wrong about the mechanism: if ServiceM8 stops sending
+// that header, this makes exactly one request and behaves identically to the
+// unpaged version. It cannot spin, and it cannot fetch less than before.
 export async function listRecentEmails(env, tenantId) {
-  return sm8Fetch(env, tenantId, `/email.json`);
-}
+  const all = [];
+  const followed = new Set();
+  let cursor = null;
 
-// ServiceM8 appears to cap /email.json at 1000 records: the first successful
-// live poll returned exactly that (2026-09-06). Exactly-round counts are how a
-// silent ceiling announces itself, and this one matters -- if the capped page
-// is the *oldest* 1000 rather than the newest, new emails fall off the end and
-// the add-on quietly stops working forever.
-export const EMAIL_PAGE_CAP = 1000;
+  for (let page = 0; page < MAX_EMAIL_PAGES; page++) {
+    const path = cursor ? `/email.json?cursor=${encodeURIComponent(cursor)}` : `/email.json`;
+    const { data, headers } = await sm8Fetch(env, tenantId, path);
+    const rows = Array.isArray(data) ? data : [];
+    all.push(...rows);
+
+    const next = headers.get("x-next-cursor");
+    // Stop on: the last page (no header), an empty page, or a cursor we have
+    // already followed -- that last one would otherwise loop until the cap.
+    if (!next || rows.length === 0 || followed.has(next)) break;
+    followed.add(next);
+    cursor = next;
+  }
+  return all;
+}
 
 // Read-only reconnaissance for that question, used by /debug/probe-emails.
 // Reports what ServiceM8 does with each candidate request instead of guessing:
@@ -80,6 +107,12 @@ export async function probeEmailRequests(env, tenantId, queries) {
         count: Array.isArray(rows) ? rows.length : null,
         first_uuid: Array.isArray(rows) && rows.length ? rows[0].uuid : null,
         last_uuid: Array.isArray(rows) && rows.length ? rows[rows.length - 1].uuid : null,
+        next_cursor: res.headers.get("x-next-cursor"),
+        // Field *names* only, never values -- these records carry customer
+        // email addresses. Enough to confirm the fields the poller reads (to,
+        // subject, opened, first_opened_at, related_object_uuid) are actually
+        // what ServiceM8 calls them.
+        fields: Array.isArray(rows) && rows.length ? Object.keys(rows[0]).sort() : null,
       });
     } catch (err) {
       results.push({ path, error: String(err).slice(0, 300) });
