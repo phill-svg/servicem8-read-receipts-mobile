@@ -215,22 +215,30 @@ already makes a wide scan harmless. `poll_runs.scanned` records how wide it
 actually is. Narrow it only with that number in hand, and only to a filter
 proven against a live account.
 
-**Open question: the 1000-record ceiling.** The first successful live poll
-(2026-09-06 13:40) returned `scanned: 1000` -- exactly, which is how a silent
-cap announces itself rather than a real count. It hasn't caused a miss yet:
-that same run posted a note for a genuinely new open, so recent emails are
-inside the window. But the ordering is unknown, and that's the risk. If the
-capped page is the *oldest* 1000 rather than the newest, then once the account
-has more than 1000 emails, new ones fall off the end and the add-on quietly
-stops working -- no error, no failed run, just silence. Exactly the failure
-mode this poller is already once guilty of.
+**The 1000-record ceiling, settled.** Probed against the live account
+2026-09-06:
 
-`/debug/probe-emails?tenant=<id>` answers it against the live account without
-guessing. It's read-only -- posts nothing, writes nothing -- and reports what
-ServiceM8 does with `$top`, `$skip` and `opened eq '1'`: a 400 means
-unsupported (the way `edit_date` was), and a parameter that's accepted but
-ignored comes back with the same first/last uuid as the plain call. Run it,
-then implement paging against the answer.
+| Request | Result |
+| --- | --- |
+| `/email.json` | 200, 1000 rows |
+| `?$top=5` | 200, **1000** rows, identical first/last uuid |
+| `?$top=1000&$skip=1000` | 200, **1000** rows, identical first/last uuid |
+| `?$filter=opened eq '1'` | 400 `Unsupported $filter field: opened` |
+
+So `$top` and `$skip` are accepted and **silently ignored**, and `opened` is no
+more filterable than `edit_date` was. ServiceM8 pages `/email.json` with a
+cursor instead: the response carries an `x-next-cursor` header, which you pass
+back as `?cursor=<value>`, and the header is absent on the last page.
+
+`listRecentEmails` now walks those pages. The loop is driven entirely by the
+header, which is what makes it safe: if ServiceM8 stops sending it, the walk
+makes exactly one request and behaves identically to the unpaged version. It
+cannot spin and cannot fetch less than before. It stops on the last page, an
+empty page, a repeated cursor, or 20 pages (20k emails), whichever comes first.
+
+Left unpaged, this was a live silent-failure waiting to happen: the poller
+would have sat on exactly 1000 records looking perfectly healthy while never
+seeing the 1001st.
 
 (The OAuth scope for creating notes -- `publish_job_notes` -- is confirmed
 against ServiceM8's own published scope list, not a guess.)
