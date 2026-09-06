@@ -38,8 +38,6 @@ export function formatReadReceiptNote(email) {
   return `📧 Email opened${recipient}${subject} -- ${when}`;
 }
 
-const LOOKBACK_DAYS = 30; // emails older than this are assumed already handled; bounds the poll size
-
 // Dedupe is deliberately account-wide rather than per-tenant. ServiceM8 record
 // UUIDs are globally unique, so an email UUID can only ever belong to one
 // account -- and that makes this the fix for a real failure mode: every visit
@@ -100,17 +98,17 @@ const liveApi = { listRecentEmails, createJobNote };
 export async function pollTenantForReadReceipts(env, tenantId, { source = "manual", api = liveApi } = {}) {
   const runId = await startRun(env.DB, { source, tenantId });
   try {
-    const since = new Date(Date.now() - LOOKBACK_DAYS * 24 * 60 * 60 * 1000);
-    const emails = await api.listRecentEmails(env, tenantId, { since });
+    const emails = await api.listRecentEmails(env, tenantId);
     const notifiedSet = await alreadyNotifiedEmailUuids(env.DB);
 
     const toNotify = selectNewlyOpenedEmails(emails, notifiedSet);
 
-    // Backfill guard. LOOKBACK_DAYS is 30, so a tenant's first successful poll
-    // would otherwise post a note for every email opened in the past month --
-    // dozens at once, onto real customer jobs, with no way to take them back.
-    // A read receipt is only useful as news, so the first poll records what it
-    // found and stays quiet; opens from here on get a note.
+    // Backfill guard. The poll is unfiltered (see listRecentEmails), so a
+    // tenant's first successful poll sees every email the account has ever
+    // opened -- and would post a note for all of them at once, onto real
+    // customer jobs, with no way to take them back. A read receipt is only
+    // useful as news, so the first poll records what it found and stays quiet;
+    // opens from here on get a note.
     if (!(await hasBaseline(env.DB, tenantId))) {
       const suppressed = await recordBaseline(env.DB, tenantId, toNotify);
       await finishRun(env.DB, runId, { ok: true, scanned: (emails || []).length, notified: 0 });

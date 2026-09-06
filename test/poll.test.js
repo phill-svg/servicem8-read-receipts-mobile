@@ -175,3 +175,37 @@ test("a first poll that fails does not lay down a baseline", async () => {
 
   assert.deepEqual(db.state.baselined, []);
 });
+
+test("email.json is fetched with no $filter at all", async () => {
+  // Regression guard for the bug that stopped every poll from install onwards:
+  // ServiceM8 answers `$filter=edit_date gt ...` on email.json with
+  // 400 "Unsupported $filter field: edit_date".
+  const { listRecentEmails } = await import("../src/servicem8-api.js");
+  const env = {
+    DB: {
+      prepare: () => ({
+        bind: () => ({
+          async first() {
+            return { access_token: "tok", access_token_expires_at: Date.now() + 3600_000 };
+          },
+        }),
+      }),
+    },
+  };
+
+  const called = [];
+  const realFetch = globalThis.fetch;
+  globalThis.fetch = async (url) => {
+    called.push(String(url));
+    return new Response("[]", { status: 200, headers: { "Content-Type": "application/json" } });
+  };
+  try {
+    await listRecentEmails(env, "t1");
+  } finally {
+    globalThis.fetch = realFetch;
+  }
+
+  assert.equal(called.length, 1);
+  assert.equal(called[0], "https://api.servicem8.com/api_1.0/email.json");
+  assert.doesNotMatch(called[0], /filter/i);
+});
