@@ -72,6 +72,12 @@ itself the answer to "is the cron firing?".
 - **In a browser:** `/debug/status` returns install state, whether each secret
   is present, `last_cron_run`, and the last 15 runs with their errors. It
   exposes no tokens and truncates tenant ids.
+
+  One trap: `last_cron_run` is only meaningful once this code is in
+  **production**. Reading it from a branch preview always shows `null` --
+  previews never run the schedule, and the production deployment can only
+  record a cron run once it carries the code that writes `poll_runs`. Until
+  then a `null` there proves nothing about cause 1.
 - **Force a run now:** `/debug/poll-all` runs the exact code path the cron
   runs and returns the result, rather than waiting up to 10 minutes.
   Rate-limited to one manual run per 30 seconds.
