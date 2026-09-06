@@ -215,5 +215,22 @@ already makes a wide scan harmless. `poll_runs.scanned` records how wide it
 actually is. Narrow it only with that number in hand, and only to a filter
 proven against a live account.
 
+**Open question: the 1000-record ceiling.** The first successful live poll
+(2026-09-06 13:40) returned `scanned: 1000` -- exactly, which is how a silent
+cap announces itself rather than a real count. It hasn't caused a miss yet:
+that same run posted a note for a genuinely new open, so recent emails are
+inside the window. But the ordering is unknown, and that's the risk. If the
+capped page is the *oldest* 1000 rather than the newest, then once the account
+has more than 1000 emails, new ones fall off the end and the add-on quietly
+stops working -- no error, no failed run, just silence. Exactly the failure
+mode this poller is already once guilty of.
+
+`/debug/probe-emails?tenant=<id>` answers it against the live account without
+guessing. It's read-only -- posts nothing, writes nothing -- and reports what
+ServiceM8 does with `$top`, `$skip` and `opened eq '1'`: a 400 means
+unsupported (the way `edit_date` was), and a parameter that's accepted but
+ignored comes back with the same first/last uuid as the plain call. Run it,
+then implement paging against the answer.
+
 (The OAuth scope for creating notes -- `publish_job_notes` -- is confirmed
 against ServiceM8's own published scope list, not a guess.)

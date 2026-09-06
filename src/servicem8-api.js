@@ -48,6 +48,46 @@ export async function listRecentEmails(env, tenantId) {
   return sm8Fetch(env, tenantId, `/email.json`);
 }
 
+// ServiceM8 appears to cap /email.json at 1000 records: the first successful
+// live poll returned exactly that (2026-09-06). Exactly-round counts are how a
+// silent ceiling announces itself, and this one matters -- if the capped page
+// is the *oldest* 1000 rather than the newest, new emails fall off the end and
+// the add-on quietly stops working forever.
+export const EMAIL_PAGE_CAP = 1000;
+
+// Read-only reconnaissance for that question, used by /debug/probe-emails.
+// Reports what ServiceM8 does with each candidate request instead of guessing:
+// an unsupported $filter or paging parameter is a 400 (like edit_date was), and
+// a parameter that's accepted but ignored shows up as an identical first/last
+// uuid. Posts nothing and writes nothing.
+export async function probeEmailRequests(env, tenantId, queries) {
+  const token = await getValidAccessToken(env, tenantId);
+  const results = [];
+  for (const query of queries) {
+    const path = query ? `/email.json?${query}` : `/email.json`;
+    try {
+      const res = await fetch(`${API_BASE}${path}`, {
+        headers: { Authorization: `Bearer ${token}`, Accept: "application/json" },
+      });
+      if (!res.ok) {
+        results.push({ path, status: res.status, body: (await res.text()).slice(0, 300) });
+        continue;
+      }
+      const rows = await res.json();
+      results.push({
+        path,
+        status: res.status,
+        count: Array.isArray(rows) ? rows.length : null,
+        first_uuid: Array.isArray(rows) && rows.length ? rows[0].uuid : null,
+        last_uuid: Array.isArray(rows) && rows.length ? rows[rows.length - 1].uuid : null,
+      });
+    } catch (err) {
+      results.push({ path, error: String(err).slice(0, 300) });
+    }
+  }
+  return results;
+}
+
 // Posts a Job Note -- shows up in the Job Diary on both desktop AND mobile.
 // This is the whole trick this add-on relies on: ServiceM8's own read-receipt
 // data (email.json's opened/first_opened_at) only renders on desktop, but a
