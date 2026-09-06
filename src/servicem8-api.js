@@ -82,42 +82,57 @@ export async function listRecentEmails(env, tenantId) {
   return all;
 }
 
-// Read-only reconnaissance for that question, used by /debug/probe-emails.
-// Reports what ServiceM8 does with each candidate request instead of guessing:
-// an unsupported $filter or paging parameter is a 400 (like edit_date was), and
-// a parameter that's accepted but ignored shows up as an identical first/last
-// uuid. Posts nothing and writes nothing.
-export async function probeEmailRequests(env, tenantId, queries) {
+// Read-only reconnaissance, used by /debug/probe-emails.
+//
+// The first version of this guessed at header and parameter names. That was the
+// same mistake twice over, so it now dumps *every* response header and probes
+// the cursor with a value taken from the live data rather than invented:
+// ServiceM8's docs describe cursor paging where the cursor is a record UUID, so
+// step 2 replays the first page's last uuid as ?cursor=. If page 2 comes back
+// with different uuids, that's the mechanism.
+//
+// Posts nothing, writes nothing, and returns no field values -- only names.
+export async function probeEmailRequests(env, tenantId) {
   const token = await getValidAccessToken(env, tenantId);
-  const results = [];
-  for (const query of queries) {
+
+  async function attempt(label, query) {
     const path = query ? `/email.json?${query}` : `/email.json`;
     try {
       const res = await fetch(`${API_BASE}${path}`, {
         headers: { Authorization: `Bearer ${token}`, Accept: "application/json" },
       });
-      if (!res.ok) {
-        results.push({ path, status: res.status, body: (await res.text()).slice(0, 300) });
-        continue;
-      }
+      const headers = Object.fromEntries([...res.headers].filter(([k]) => !/^set-cookie$/i.test(k)));
+      if (!res.ok) return { label, path, status: res.status, headers, body: (await res.text()).slice(0, 300) };
+
       const rows = await res.json();
-      results.push({
+      const list = Array.isArray(rows) ? rows : [];
+      return {
+        label,
         path,
         status: res.status,
-        count: Array.isArray(rows) ? rows.length : null,
-        first_uuid: Array.isArray(rows) && rows.length ? rows[0].uuid : null,
-        last_uuid: Array.isArray(rows) && rows.length ? rows[rows.length - 1].uuid : null,
-        next_cursor: res.headers.get("x-next-cursor"),
-        // Field *names* only, never values -- these records carry customer
-        // email addresses. Enough to confirm the fields the poller reads (to,
-        // subject, opened, first_opened_at, related_object_uuid) are actually
-        // what ServiceM8 calls them.
-        fields: Array.isArray(rows) && rows.length ? Object.keys(rows[0]).sort() : null,
-      });
+        headers,
+        count: list.length,
+        first_uuid: list.length ? list[0].uuid : null,
+        last_uuid: list.length ? list[list.length - 1].uuid : null,
+        // Names only -- these records carry customer email addresses. Enough to
+        // confirm the fields the poller reads are called what it thinks.
+        fields: list.length ? Object.keys(list[0]).sort() : null,
+      };
     } catch (err) {
-      results.push({ path, error: String(err).slice(0, 300) });
+      return { label, path, error: String(err).slice(0, 300) };
     }
   }
+
+  const first = await attempt("baseline", "");
+  const results = [first];
+
+  // Replay the last record's uuid as a cursor -- the one candidate drawn from
+  // live data rather than guessed. Compare first_uuid against the baseline: if
+  // it differs, paging works and this is how.
+  if (first.last_uuid) results.push(await attempt("cursor=last_uuid", `cursor=${encodeURIComponent(first.last_uuid)}`));
+
+  results.push(await attempt("page=2", "page=2"));
+  results.push(await attempt("per_page=5", "per_page=5"));
   return results;
 }
 

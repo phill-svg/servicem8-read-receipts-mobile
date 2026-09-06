@@ -234,11 +234,23 @@ more filterable than `edit_date` was. ServiceM8 pages `/email.json` with a
 cursor instead: the response carries an `x-next-cursor` header, which you pass
 back as `?cursor=<value>`, and the header is absent on the last page.
 
-`listRecentEmails` now walks those pages. The loop is driven entirely by the
-header, which is what makes it safe: if ServiceM8 stops sending it, the walk
-makes exactly one request and behaves identically to the unpaged version. It
-cannot spin and cannot fetch less than before. It stops on the last page, an
-empty page, a repeated cursor, or 20 pages (20k emails), whichever comes first.
+`listRecentEmails` walks pages driven entirely by that header, which is what
+makes it safe: if ServiceM8 doesn't send it, the walk makes exactly one request
+and behaves identically to the unpaged version. It cannot spin and cannot fetch
+less than before. It stops on the last page, an empty page, a repeated cursor,
+or 20 pages (20k emails), whichever comes first.
+
+**And that safety net is currently load-bearing: the walk is inert.** The
+first cron run with paging deployed (14:20) still scanned exactly 1000, so
+ServiceM8 is *not* sending `x-next-cursor` on `/email.json`. The header name
+came from a search summary of ServiceM8's docs rather than from the live API --
+a guess, which is the mistake this project has now made three times.
+
+So the ceiling is still unresolved, and `/debug/probe-emails` has been rebuilt
+to stop guessing: it dumps **every** response header, and probes the cursor with
+a value taken from live data (the first page's `last_uuid` replayed as
+`?cursor=`) rather than an invented one. If page two comes back with different
+uuids, that's the mechanism. It also tries `page=2` and `per_page=5`.
 
 Left unpaged, this was a live silent-failure waiting to happen: the poller
 would have sat on exactly 1000 records looking perfectly healthy while never
