@@ -2,10 +2,11 @@
 // poller end to end. Statements are matched on a distinctive fragment of their
 // SQL -- crude, but it keeps the fake honest: an unrecognised query throws
 // rather than quietly returning nothing and passing a test it shouldn't.
-export function fakeDb({ tenants = [], notified = [] } = {}) {
+export function fakeDb({ tenants = [], notified = [], baselined = [] } = {}) {
   const state = {
     tenants: tenants.map((t) => ({ status: "active", ...t })),
     notified: [...notified],
+    baselined: [...baselined],
     runs: [],
     nextRunId: 1,
   };
@@ -34,6 +35,10 @@ export function fakeDb({ tenants = [], notified = [] } = {}) {
           if (!dup) state.notified.push({ tenant_id: args[0], email_uuid: args[1], job_uuid: args[2], opened_at: args[3] });
           return { meta: { changes: dup ? 0 : 1 } };
         }
+        if (sql.includes("INSERT INTO tenant_baselines")) {
+          if (!state.baselined.includes(args[0])) state.baselined.push(args[0]);
+          return { meta: { changes: 1 } };
+        }
         if (sql.includes("UPDATE tenants SET status")) {
           const tenant = state.tenants.find((t) => t.tenant_id === args[1]);
           if (tenant) tenant.status = "reauth_required";
@@ -51,6 +56,9 @@ export function fakeDb({ tenants = [], notified = [] } = {}) {
         throw new Error(`fakeDb: unexpected all() for ${sql}`);
       },
       async first() {
+        if (sql.includes("FROM tenant_baselines")) {
+          return state.baselined.includes(args[0]) ? { tenant_id: args[0] } : null;
+        }
         throw new Error(`fakeDb: unexpected first() for ${sql}`);
       },
     };

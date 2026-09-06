@@ -52,3 +52,16 @@ CREATE TABLE IF NOT EXISTS poll_runs (
   error       TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_poll_runs_started ON poll_runs(started_at);
+
+-- First-poll baseline -- see "backfill" in src/read-receipts.js. The poller
+-- looks back 30 days, so a tenant's very first successful poll would otherwise
+-- post a note for every email opened in the last month, all at once, onto real
+-- customer jobs. Instead that first poll records those emails as already
+-- handled and posts nothing; only opens from then on raise a note.
+-- To deliberately replay a tenant's backlog: delete its row here and its
+-- notified_emails rows, then poll again.
+CREATE TABLE IF NOT EXISTS tenant_baselines (
+  tenant_id    TEXT PRIMARY KEY REFERENCES tenants(tenant_id),
+  baselined_at INTEGER NOT NULL,
+  suppressed   INTEGER NOT NULL
+);

@@ -29,7 +29,7 @@ The selection/formatting logic (`selectNewlyOpenedEmails`,
 - D1 database `read-receipts-mobile-db` exists, its `database_id` is wired
   into `wrangler.jsonc`, and the schema **has been applied**: `tenants`,
   `oauth_tokens`, `notified_emails` and `idx_notified_emails_tenant`
-  (2026-09-05), plus `poll_runs` (2026-09-06). Re-running
+  (2026-09-05), plus `poll_runs` and `tenant_baselines` (2026-09-06). Re-running
   `npm run db:init:remote` is harmless -- every statement is
   `CREATE ... IF NOT EXISTS`.
 
@@ -82,6 +82,22 @@ Both `/debug` routes are open by default -- deliberately, since they're the
 tool for triaging a deployment before anything else about it is known to work.
 Set a `DEBUG_KEY` secret on the Worker to require `?key=...` on them.
 
+## The first poll posts nothing, on purpose
+
+The poller looks back 30 days and `notified_emails` is empty, so the first
+successful poll would otherwise post a note for every email opened in the past
+month -- dozens at once, onto real customer jobs, with no undo. Instead a
+tenant's first successful poll records what it found in `notified_emails`,
+writes a `tenant_baselines` row, and posts nothing; every poll after that
+notifies normally.
+
+So the first green run reports `notified: 0` and `seeded: N`. That is the
+system working, not failing -- open an email after it and the next poll (within
+10 minutes) should post the note.
+
+To deliberately replay a tenant's backlog, delete its `tenant_baselines` row
+and its `notified_emails` rows, then poll again.
+
 ## If a tenant needs reinstalling
 
 A refresh token ServiceM8 rejects outright (any 4xx) is gone for good, so the
@@ -124,11 +140,13 @@ already handled.
 2. ~~**Set the two secrets** on the deployed Worker.~~ Done -- proven by two
    successful OAuth exchanges, see "Current status".
 
-3. **Connect this repo to Cloudflare Workers Builds** (Git integration) so
-   pushes auto-deploy, the same way `servicem8-renewal-autopilot` is wired
-   up -- Cloudflare dashboard -> Workers & Pages -> Create -> Connect to Git
-   -> this repo. **Confirm the Triggers tab shows the cron afterwards** --
-   see cause 1 above.
+3. ~~**Connect this repo to Cloudflare Workers Builds**~~ Done -- a push to a
+   branch on 2026-09-06 produced a Workers Build and a preview deployment, so
+   the Git integration is live. Pushes to `main` deploy to production; pushes
+   to other branches upload a preview version only, which is why a branch
+   preview never runs the cron. **Still confirm the Triggers tab shows
+   `*/10 * * * *`** -- that's cause 1 above, and Workers Builds being
+   connected doesn't prove the schedule was applied.
 
 4. ~~**Apply the schema** to the remote D1 database.~~ Done.
 

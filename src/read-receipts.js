@@ -52,6 +52,32 @@ async function alreadyNotifiedEmailUuids(db) {
   return new Set((rows.results || []).map((r) => r.email_uuid));
 }
 
+async function hasBaseline(db, tenantId) {
+  const row = await db.prepare("SELECT tenant_id FROM tenant_baselines WHERE tenant_id = ?").bind(tenantId).first();
+  return Boolean(row);
+}
+
+// Marks everything the first poll found as already handled, without posting.
+// Written before the baseline row itself, so a crash midway just means the
+// next poll finishes seeding rather than notifying the backlog.
+async function recordBaseline(db, tenantId, emails) {
+  for (const email of emails) {
+    await db
+      .prepare(
+        `INSERT INTO notified_emails (tenant_id, email_uuid, job_uuid, opened_at, notified_at)
+         VALUES (?, ?, ?, ?, ?)
+         ON CONFLICT(tenant_id, email_uuid) DO NOTHING`
+      )
+      .bind(tenantId, email.uuid, email.related_object_uuid, email.first_opened_at || null, Date.now())
+      .run();
+  }
+  await db
+    .prepare("INSERT INTO tenant_baselines (tenant_id, baselined_at, suppressed) VALUES (?, ?, ?) ON CONFLICT(tenant_id) DO NOTHING")
+    .bind(tenantId, Date.now(), emails.length)
+    .run();
+  return emails.length;
+}
+
 // A 4xx on the token refresh means the grant is gone for good. Park the tenant
 // so the cron stops retrying it every 10 minutes forever; a fresh /install
 // creates a working one, and the dedupe above stops the replacement
@@ -79,6 +105,18 @@ export async function pollTenantForReadReceipts(env, tenantId, { source = "manua
     const notifiedSet = await alreadyNotifiedEmailUuids(env.DB);
 
     const toNotify = selectNewlyOpenedEmails(emails, notifiedSet);
+
+    // Backfill guard. LOOKBACK_DAYS is 30, so a tenant's first successful poll
+    // would otherwise post a note for every email opened in the past month --
+    // dozens at once, onto real customer jobs, with no way to take them back.
+    // A read receipt is only useful as news, so the first poll records what it
+    // found and stays quiet; opens from here on get a note.
+    if (!(await hasBaseline(env.DB, tenantId))) {
+      const suppressed = await recordBaseline(env.DB, tenantId, toNotify);
+      await finishRun(env.DB, runId, { ok: true, scanned: (emails || []).length, notified: 0 });
+      return { tenantId, scanned: (emails || []).length, eligible: toNotify.length, notified: 0, seeded: suppressed, error: null };
+    }
+
     let notified = 0;
     const failures = [];
     for (const email of toNotify) {
@@ -103,13 +141,13 @@ export async function pollTenantForReadReceipts(env, tenantId, { source = "manua
     const scanned = (emails || []).length;
     const error = failures.length ? failures.join(" | ") : null;
     await finishRun(env.DB, runId, { ok: !error, scanned, notified, error });
-    return { tenantId, scanned, eligible: toNotify.length, notified, error };
+    return { tenantId, scanned, eligible: toNotify.length, notified, seeded: 0, error };
   } catch (err) {
     console.error(`read-receipts: poll failed for tenant ${tenantId}`, err);
     const parked = await parkTenantIfGrantLost(env.DB, tenantId, err).catch(() => false);
     const error = parked ? `${describeError(err)} [tenant parked: reauth_required]` : describeError(err);
     await finishRun(env.DB, runId, { ok: false, error });
-    return { tenantId, scanned: 0, eligible: 0, notified: 0, error };
+    return { tenantId, scanned: 0, eligible: 0, notified: 0, seeded: 0, error };
   }
 }
 
@@ -119,7 +157,7 @@ export async function pollTenantForReadReceipts(env, tenantId, { source = "manua
 // live attempt.
 export async function pollAllTenants(env, { source = "cron", api = liveApi } = {}) {
   const runId = await startRun(env.DB, { source });
-  const summary = { source, tenants: 0, scanned: 0, notified: 0, failures: [] };
+  const summary = { source, tenants: 0, scanned: 0, notified: 0, seeded: 0, failures: [] };
   try {
     const tenants = await env.DB.prepare("SELECT tenant_id FROM tenants WHERE status = 'active'").all();
     for (const { tenant_id } of tenants.results || []) {
@@ -127,6 +165,7 @@ export async function pollAllTenants(env, { source = "cron", api = liveApi } = {
       const result = await pollTenantForReadReceipts(env, tenant_id, { source, api });
       summary.scanned += result.scanned;
       summary.notified += result.notified;
+      summary.seeded += result.seeded || 0;
       if (result.error) summary.failures.push(`${tenant_id}: ${result.error}`);
     }
     await finishRun(env.DB, runId, {

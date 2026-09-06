@@ -30,7 +30,7 @@ function fakeApi({ emails = [], failNoteFor = null, listError = null } = {}) {
 }
 
 test("posts a note for a newly opened email and records it", async () => {
-  const db = fakeDb({ tenants: [{ tenant_id: "t1" }] });
+  const db = fakeDb({ tenants: [{ tenant_id: "t1" }], baselined: ["t1"] });
   const api = fakeApi({ emails: [openedEmail("e1")] });
 
   const result = await pollTenantForReadReceipts({ DB: db }, "t1", { api });
@@ -49,6 +49,7 @@ test("a second tenant on the same account does not re-post an already notified e
   const db = fakeDb({
     tenants: [{ tenant_id: "t1" }, { tenant_id: "t2" }],
     notified: [{ tenant_id: "t1", email_uuid: "e1" }],
+    baselined: ["t1", "t2"],
   });
   const api = fakeApi({ emails: [openedEmail("e1")] });
 
@@ -60,7 +61,7 @@ test("a second tenant on the same account does not re-post an already notified e
 });
 
 test("records every run, including which schedule fired it", async () => {
-  const db = fakeDb({ tenants: [{ tenant_id: "t1" }] });
+  const db = fakeDb({ tenants: [{ tenant_id: "t1" }], baselined: ["t1"] });
   await pollAllTenants({ DB: db }, { source: "cron:*/10 * * * *", api: fakeApi() });
 
   const runLevel = db.state.runs.filter((r) => r.tenant_id === null);
@@ -72,7 +73,7 @@ test("records every run, including which schedule fired it", async () => {
 });
 
 test("a failing tenant is recorded and does not stop the other tenants", async () => {
-  const db = fakeDb({ tenants: [{ tenant_id: "t1" }, { tenant_id: "t2" }] });
+  const db = fakeDb({ tenants: [{ tenant_id: "t1" }, { tenant_id: "t2" }], baselined: ["t1", "t2"] });
   let call = 0;
   const api = {
     async listRecentEmails() {
@@ -96,7 +97,7 @@ test("a failing tenant is recorded and does not stop the other tenants", async (
 });
 
 test("a rejected refresh token parks the tenant instead of retrying forever", async () => {
-  const db = fakeDb({ tenants: [{ tenant_id: "t1" }] });
+  const db = fakeDb({ tenants: [{ tenant_id: "t1" }], baselined: ["t1"] });
   const listError = new ServiceM8TokenError("ServiceM8 OAuth token request failed: 400 invalid_grant", { status: 400 });
   const api = fakeApi({ listError });
 
@@ -111,7 +112,7 @@ test("a rejected refresh token parks the tenant instead of retrying forever", as
 });
 
 test("a ServiceM8 outage is retried rather than parking the tenant", async () => {
-  const db = fakeDb({ tenants: [{ tenant_id: "t1" }] });
+  const db = fakeDb({ tenants: [{ tenant_id: "t1" }], baselined: ["t1"] });
   const listError = new ServiceM8TokenError("ServiceM8 OAuth token request failed: 503 unavailable", { status: 503 });
 
   await pollTenantForReadReceipts({ DB: db }, "t1", { api: fakeApi({ listError }) });
@@ -120,7 +121,7 @@ test("a ServiceM8 outage is retried rather than parking the tenant", async () =>
 });
 
 test("an email whose note fails to post is left for the next run to retry", async () => {
-  const db = fakeDb({ tenants: [{ tenant_id: "t1" }] });
+  const db = fakeDb({ tenants: [{ tenant_id: "t1" }], baselined: ["t1"] });
   const api = fakeApi({ emails: [openedEmail("e1", "job-bad")], failNoteFor: "job-bad" });
 
   const result = await pollTenantForReadReceipts({ DB: db }, "t1", { api });
@@ -136,4 +137,41 @@ test("missing OAuth config is reported as config, not as a ServiceM8 problem", a
     () => exchangeCodeForTokens({ SERVICEM8_APP_ID: "123" }, { code: "c", redirectUri: "r" }),
     /SERVICEM8_APP_SECRET is unset/
   );
+});
+
+test("a tenant's first poll seeds the backlog instead of posting 30 days of notes", async () => {
+  const db = fakeDb({ tenants: [{ tenant_id: "t1" }] }); // no baseline yet
+  const api = fakeApi({ emails: [openedEmail("e1"), openedEmail("e2", "job-2"), openedEmail("e3", "job-3")] });
+
+  const result = await pollTenantForReadReceipts({ DB: db }, "t1", { api });
+
+  assert.equal(result.notified, 0, "nothing posted");
+  assert.equal(result.seeded, 3);
+  assert.equal(api.posted.length, 0);
+  assert.deepEqual(db.state.notified.map((n) => n.email_uuid).sort(), ["e1", "e2", "e3"]);
+  assert.deepEqual(db.state.baselined, ["t1"]);
+});
+
+test("the poll after the baseline notifies only genuinely new opens", async () => {
+  const db = fakeDb({ tenants: [{ tenant_id: "t1" }] });
+  const backlog = [openedEmail("e1"), openedEmail("e2", "job-2")];
+  await pollTenantForReadReceipts({ DB: db }, "t1", { api: fakeApi({ emails: backlog }) });
+
+  const api = fakeApi({ emails: [...backlog, openedEmail("e3", "job-3")] });
+  const result = await pollTenantForReadReceipts({ DB: db }, "t1", { api });
+
+  assert.equal(result.notified, 1);
+  assert.equal(api.posted.length, 1);
+  assert.equal(api.posted[0].jobUuid, "job-3");
+});
+
+test("a first poll that fails does not lay down a baseline", async () => {
+  // Otherwise a transient outage on the very first run would silently swallow
+  // the tenant's real backlog boundary.
+  const db = fakeDb({ tenants: [{ tenant_id: "t1" }] });
+  const listError = new ServiceM8TokenError("ServiceM8 OAuth token request failed: 503 unavailable", { status: 503 });
+
+  await pollTenantForReadReceipts({ DB: db }, "t1", { api: fakeApi({ listError }) });
+
+  assert.deepEqual(db.state.baselined, []);
 });
