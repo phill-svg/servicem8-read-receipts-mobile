@@ -172,13 +172,7 @@ export default {
       // 400s is unsupported, and one that's accepted but ignored comes back
       // with the same uuids as the unparameterised call.
       if (url.pathname === "/debug/probe-emails" && url.searchParams.get("tenant")) {
-        const probes = await probeEmailRequests(env, url.searchParams.get("tenant"), [
-          "",
-          "%24top=5",
-          "%24top=1000&%24skip=1000",
-          "%24filter=" + encodeURIComponent("opened eq '1'"),
-        ]);
-        return json(probes);
+        return json(await probeEmailRequests(env, url.searchParams.get("tenant")));
       }
 
       // Single-tenant variant, for when only one of several tenants misbehaves.
